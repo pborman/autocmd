@@ -11,11 +11,17 @@
 // file and each time the file is written some command (such as publishing)
 // should be executed.
 //
+// The --edit flag turns off verbose and clear and turns on silent and wait.
+//
 // Normally autocmd immediately executes the specified command.  The --wait
 // option causes autocmd wait for the first change to the file before executing
 // the command.
 //
-// The --edit flag turns off verbose and clear and turns on silent and wait.
+// Use --more to page the output through the more(1) command.
+//
+// When a command exits the real (elapsed), user, and system time are displayed.
+// If --more is specified then the user and system times may also include
+// time spent by the more process.
 package main
 
 import (
@@ -28,6 +34,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/pborman/getopt/v2"
@@ -116,7 +123,9 @@ func Edit(path string, ch chan error) {
 	ch <- cmd.Run()
 }
 
-var now = time.Now
+func now() string {
+	return time.Now().Format("2006-01-02 15:04:05 MST")
+}
 
 func main() {
 	var mu sync.Mutex
@@ -307,6 +316,8 @@ func main() {
 			acmd.Stdout = w
 			acmd.Stderr = w
 		}
+		var rusageStart, rusageEnd syscall.Rusage
+		syscall.Getrusage(syscall.RUSAGE_CHILDREN, &rusageStart)
 		startedRunning := time.Now()
 		if err := acmd.Start(); err != nil {
 			printf("%v\n", err)
@@ -326,6 +337,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			cerr = acmd.Wait()
+			syscall.Getrusage(syscall.RUSAGE_CHILDREN, &rusageEnd)
 			if mcmd != nil {
 				acmd.Stdout.(io.WriteCloser).Close()
 			}
@@ -338,18 +350,21 @@ func main() {
 				wg.Done()
 			}()
 		}
-		go func(started time.Time) {
+		go func() {
 			wg.Wait()
-			dur := time.Now().Sub(started).Round(time.Millisecond)
+			user := time.Duration(rusageEnd.Utime.Nano() - rusageStart.Utime.Nano()).Round(time.Millisecond)
+			sys := time.Duration(rusageEnd.Stime.Nano() - rusageStart.Stime.Nano()).Round(time.Millisecond)
+			real := time.Now().Sub(startedRunning).Round(time.Millisecond)
 			if cerr != nil {
-				printf("Command died with %v after %v\n", cerr, dur)
+				printf("Command died with %v ", cerr)
 			} else {
-				printf("Command exited after %v\n", dur)
+				printf("Command exited ")
 			}
+			fmt.Printf("(real: %v, user: %v, sys: %v)\n", real, user, sys)
 			if merr != nil {
 				printf("More died with %v\n", merr)
 			}
 			close(f)
-		}(startedRunning)
+		}()
 	}
 }
