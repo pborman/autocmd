@@ -34,7 +34,7 @@ import (
 	"github.com/pborman/options"
 )
 
-var opts = struct {
+var flags = struct {
 	Editor  string        `getopt:"--editor=EDITOR editor to use "`
 	Verbose bool          `getopt:"--verbose -v be verbose"`
 	Quiet   bool          `getopt:"--silent -s be very very quiet"`
@@ -42,6 +42,7 @@ var opts = struct {
 	Clear   bool          `getopt:"--clear -c clear display before executing a command"`
 	Edit    bool          `getopt:"--edit use edit mode"`
 	Wait    bool          `getopt:"--wait wait for first change"`
+	More    bool          `getopt:"--more pipe output through more"`
 }{
 	Timeout: time.Hour,
 	Editor:  "vi",
@@ -108,7 +109,7 @@ func MultiGlob(patterns []string) (map[string]os.FileInfo, error) {
 }
 
 func Edit(path string, ch chan error) {
-	cmd := exec.Command(opts.Editor, path)
+	cmd := exec.Command(flags.Editor, path)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -123,7 +124,7 @@ func main() {
 
 	var cmd []string
 	getopt.SetParameters("PATTERN [...] -- CMD [...]")
-	patterns := options.RegisterAndParse(&opts)
+	patterns := options.RegisterAndParse(&flags)
 
 	for x, arg := range patterns {
 		if arg == "--" {
@@ -136,7 +137,7 @@ func main() {
 		getopt.PrintUsage(os.Stderr)
 		os.Exit(1)
 	}
-	var acmd *exec.Cmd
+	var acmd, mcmd *exec.Cmd
 
 	var endTime time.Time
 	var ech chan error
@@ -146,11 +147,12 @@ func main() {
 
 	last := map[string]os.FileInfo{}
 
-	if opts.Edit {
-		opts.Wait = true
-		opts.Verbose = false
-		opts.Clear = false
-		opts.Quiet = true
+	if flags.Edit {
+		flags.Wait = true
+		flags.Verbose = false
+		flags.More = false
+		flags.Clear = false
+		flags.Quiet = true
 
 		files, err := MultiGlob(patterns)
 		if err != nil {
@@ -172,7 +174,7 @@ func main() {
 	vprintf := func(f string, v ...interface{}) {}
 	vflush := func() {}
 
-	if opts.Verbose {
+	if flags.Verbose {
 		var vbuf bytes.Buffer
 		vprintf = func(f string, v ...interface{}) {
 			fmt.Fprintf(&vbuf, f, v...)
@@ -182,11 +184,11 @@ func main() {
 			vbuf.Reset()
 		}
 	}
-	if opts.Quiet {
+	if flags.Quiet {
 		printf = func(f string, v ...interface{}) (int, error) { return 0, nil }
 	}
 
-	if opts.Clear {
+	if flags.Clear {
 		clear = func() {
 			os.Stdout.Write([]byte("\033[H\033[2J\033[3J"))
 		}
@@ -205,7 +207,7 @@ func main() {
 			delete(last, path)
 			if !ok || !SameFile(f1, f2) {
 				same = false
-				if !opts.Verbose {
+				if !flags.Verbose {
 					break
 				}
 				if ok {
@@ -224,8 +226,8 @@ func main() {
 			same = false
 		}
 		last = files
-		if opts.Wait {
-			opts.Wait = false
+		if flags.Wait {
+			flags.Wait = false
 			time.Sleep(time.Second / 2)
 			continue
 		}
@@ -254,6 +256,9 @@ func main() {
 				// The process has been started
 				printf("Killing runaway\n")
 				acmd.Process.Kill()
+				if mcmd != nil {
+					mcmd.Process.Kill()
+				}
 			}
 			time.Sleep(time.Second / 2)
 			continue
@@ -262,6 +267,8 @@ func main() {
 			mu.Lock()
 			cmd := acmd
 			acmd = nil
+			cmd2 := mcmd
+			mcmd = nil
 			mu.Unlock()
 			if cmd != nil {
 				printf("%s Killing old command\n", now())
@@ -269,28 +276,76 @@ func main() {
 				printf("%s Waiting for death...\n", now())
 				cmd.Wait()
 			}
+			if cmd2 != nil {
+				printf("%s Killing old pager\n", now())
+				cmd2.Process.Kill()
+				printf("%s Waiting for pager's death...\n", now())
+				cmd2.Wait()
+			}
 		}
 		clear()
 		vflush()
 		printf("%s Starting %s\n", now(), cmd)
 		mu.Lock()
 		acmd = exec.Command(cmd[0], cmd[1:]...)
+		if flags.More {
+			mcmd = exec.Command("more", "--dumb")
+		}
 		mu.Unlock()
-		acmd.Stdout = os.Stdout
-		acmd.Stderr = os.Stderr
+		if mcmd == nil {
+			acmd.Stdout = os.Stdout
+			acmd.Stderr = os.Stderr
+		} else {
+			r, w, err := os.Pipe()
+			if err != nil {
+				printf("%v\n", err)
+				continue
+			}
+			mcmd.Stdin = r
+			mcmd.Stdout = os.Stdout
+			mcmd.Stderr = os.Stderr
+			acmd.Stdout = w
+			acmd.Stderr = w
+		}
 		if err := acmd.Start(); err != nil {
 			printf("%v\n", err)
 			continue
 		}
+		if mcmd != nil {
+			if err := mcmd.Start(); err != nil {
+				printf("%v\n", err)
+				acmd.Process.Kill()
+			}
+		}
 		finished = make(chan struct{})
 		f := finished
-		endTime = time.Now().Add(opts.Timeout)
+		endTime = time.Now().Add(flags.Timeout)
+		var wg sync.WaitGroup
+		var cerr, merr error
+		wg.Add(1)
 		go func() {
-			err := acmd.Wait()
+			cerr = acmd.Wait()
+			if mcmd != nil {
+				acmd.Stdout.(io.WriteCloser).Close()
+			}
+			wg.Done()
+		}()
+		if mcmd != nil {
+			wg.Add(1)
+			go func() {
+				merr = mcmd.Wait()
+				wg.Done()
+			}()
+		}
+		go func() {
+			wg.Wait()
 			if err != nil {
 				printf("Command died with %v\n", err)
 			} else {
 				printf("Command exited\n")
+			}
+			if err != nil {
+				printf("More died with %v\n", err)
 			}
 			close(f)
 		}()
