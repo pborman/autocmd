@@ -307,6 +307,7 @@ func main() {
 			acmd.Stdout = w
 			acmd.Stderr = w
 		}
+		startedRunning := time.Now()
 		if err := acmd.Start(); err != nil {
 			printf("%v\n", err)
 			continue
@@ -337,17 +338,18 @@ func main() {
 				wg.Done()
 			}()
 		}
-		go func() {
+		go func(started time.Time) {
 			wg.Wait()
-			if err != nil {
-				printf("Command died with %v\n", err)
+			dur := time.Now().Sub(started).Round(time.Millisecond)
+			if cerr != nil {
+				printf("Command died with %v after %v\n", cerr, dur)
 			} else {
-				printf("Command exited\n")
+				printf("Command exited after %v\n", dur)
 			}
-			if err != nil {
-				printf("More died with %v\n", err)
+			if merr != nil {
+				printf("More died with %v\n", merr)
 			}
 			close(f)
-		}()
+		}(startedRunning)
 	}
 }
