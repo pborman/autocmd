@@ -35,17 +35,14 @@ import (
 )
 
 var flags = struct {
-	Editor  string        `getopt:"--editor=EDITOR editor to use "`
 	Verbose bool          `getopt:"--verbose -v be verbose"`
 	Quiet   bool          `getopt:"--silent -s be very very quiet"`
 	Timeout time.Duration `getopt:"--timeout=DUR -t set timeout for commands"`
 	Clear   bool          `getopt:"--clear -c clear display before executing a command"`
-	Edit    bool          `getopt:"--edit use edit mode"`
 	Wait    bool          `getopt:"--wait wait for first change"`
 	More    bool          `getopt:"--more pipe output through more"`
 }{
 	Timeout: time.Hour,
-	Editor:  "vi",
 }
 
 func SameFile(f1, f2 os.FileInfo) bool {
@@ -107,15 +104,6 @@ func MultiGlob(patterns []string) (map[string]os.FileInfo, error) {
 	}
 	return f, nil
 }
-
-func Edit(path string, ch chan error) {
-	cmd := exec.Command(flags.Editor, path)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	ch <- cmd.Run()
-}
-
 var now = time.Now
 
 func main() {
@@ -147,27 +135,8 @@ func main() {
 
 	last := map[string]os.FileInfo{}
 
-	if flags.Edit {
-		flags.Wait = true
-		flags.Verbose = false
-		flags.More = false
-		flags.Clear = false
+	if flags.More {
 		flags.Quiet = true
-
-		files, err := MultiGlob(patterns)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if len(files) != 1 {
-			fmt.Fprint(os.Stderr, "--edit requires exactly one file to watch\n")
-			os.Exit(1)
-		}
-		for pattern := range files {
-			patterns = []string{pattern}
-			ech = make(chan error, 1)
-			go Edit(pattern, ech)
-		}
 	}
 
 	printf := fmt.Printf
@@ -292,6 +261,7 @@ func main() {
 			mcmd = exec.Command("more", "--dumb")
 		}
 		mu.Unlock()
+		var out io.WriteCloser
 		if mcmd == nil {
 			acmd.Stdout = os.Stdout
 			acmd.Stderr = os.Stderr
@@ -301,6 +271,7 @@ func main() {
 				printf("%v\n", err)
 				continue
 			}
+			out = w
 			mcmd.Stdin = r
 			mcmd.Stdout = os.Stdout
 			mcmd.Stderr = os.Stderr
@@ -321,13 +292,10 @@ func main() {
 		f := finished
 		endTime = time.Now().Add(flags.Timeout)
 		var wg sync.WaitGroup
-		var cerr, merr error
 		wg.Add(1)
+		var cerr, merr error
 		go func() {
 			cerr = acmd.Wait()
-			if mcmd != nil {
-				acmd.Stdout.(io.WriteCloser).Close()
-			}
 			wg.Done()
 		}()
 		if mcmd != nil {
@@ -339,13 +307,13 @@ func main() {
 		}
 		go func() {
 			wg.Wait()
-			if err != nil {
-				printf("Command died with %v\n", err)
+			if cerr != nil {
+				printf("Command died with %v\n", cerr)
 			} else {
 				printf("Command exited\n")
 			}
-			if err != nil {
-				printf("More died with %v\n", err)
+			if out != nil {
+				out.Close()
 			}
 			close(f)
 		}()
