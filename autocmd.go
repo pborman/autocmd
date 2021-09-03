@@ -298,7 +298,7 @@ func main() {
 			if err != nil {
 				printf("Command died with %v\n", err)
 			} else {
-				printf("Command exited\n")
+				printf("Command exited ")
 			}
 			close(finished)
 		}(cmd, finished)
