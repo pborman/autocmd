@@ -14,6 +14,16 @@
 // current directory on down.  The --go flag implies --, typical usage;
 //
 //	autocmd --go go test
+//
+// Multiple sets of commands can be set to run by separating them with ---.
+// For example:
+//
+//	autocmd grammer.y -- goyacc -o grammar.go grammar.y \
+//		--- .../*.go go build
+//
+// This will cause autocmd to run goyacc if grammer.y changes and go build
+// if any .go file changes.  If grammar.y changes then grammer.go will change
+// which will trigger the go build.
 package main
 
 import (
@@ -120,35 +130,77 @@ func MultiGlob(patterns []string) (map[string]os.FileInfo, error) {
 
 var now = time.Now
 
-func main() {
-	getopt.SetParameters("PATTERN [...] -- CMD [...]")
-	patterns := options.RegisterAndParse(&flags)
+type set struct {
+	command  []string
+	patterns []string
+	seen     map[string]os.FileInfo
+}
 
-	var command []string
-	if flags.Go {
-		flags.Clear = true
-		command = patterns
-		patterns = []string{".../*.go"}
-	} else {
-		for x, arg := range patterns {
-			if arg == "--" {
-				command = patterns[x+1:]
-				patterns = patterns[:x]
-			}
-		}
-
-		if len(command) == 0 || len(patterns) == 0 {
-			getopt.PrintUsage(os.Stderr)
-			os.Exit(1)
+func newSet(args []string) *set {
+	var s set
+	s.seen = map[string]os.FileInfo{}
+	for x, arg := range args {
+		if arg == "--" {
+			s.command = args[x+1:]
+			s.patterns = args[:x]
+			break
 		}
 	}
+
+	if len(s.command) == 0 || len(s.patterns) == 0 {
+		getopt.PrintUsage(os.Stderr)
+		os.Exit(1)
+	}
+	return &s
+}
+
+var (
+	printf   = fmt.Printf
+	clear    = func() {}
+	vprintf  = func(f string, v ...interface{}) {}
+	vprintf2 = func(f string, v ...interface{}) {}
+	vflush   = func() {} // write out the contents of the vprintf buffer
+	vadd     = func() {} // append the vprintf2 buffer to the vprintf buffer
+	vclear   = func() {} // clear the vprintf2 buffer
+)
+
+func main() {
+	getopt.SetParameters("PATTERN [...] -- CMD [...] [--- CMD [...] ...]")
+
+	var sets []*set
+
+	patterns := options.RegisterAndParse(&flags)
+	if len(patterns) == 0 {
+		getopt.PrintUsage(os.Stderr)
+		os.Exit(1)
+	}
+
+	if flags.Go {
+		flags.Clear = true
+		sets = []*set{{
+			command:  patterns,
+			patterns: []string{".../*.go"},
+			seen:     map[string]os.FileInfo{},
+		}}
+	} else {
+		sets = []*set{
+			newSet(patterns),
+		}
+	}
+	for i := 0; i < len(sets); i++ {
+		for x, param := range sets[i].command {
+			if param == "---" {
+				sets = append(sets, newSet(sets[i].command[x+1:]))
+				sets[i].command = sets[i].command[:x]
+				break
+			}
+		}
+	}
+
 	var cmd *exec.Cmd
 
 	var endTime time.Time
-	finished := make(chan struct{})
-	close(finished)
 
-	printf := fmt.Printf
 	if flags.Quiet {
 		printf = func(f string, v ...interface{}) (int, error) { return 0, nil }
 	}
@@ -156,12 +208,6 @@ func main() {
 	// Verbose functions.  They only have effect when flags.Versose is on.
 	// The vprintf2 buffer is cleared before each pass.  If a pass finds
 	// changes then the vprintf2 buffer is writen to the vprintf buffer.
-
-	vprintf := func(f string, v ...interface{}) {}
-	vprintf2 := func(f string, v ...interface{}) {}
-	vflush := func() {} // write out the contents of the vprintf buffer
-	vadd := func() {}   // append the vprintf2 buffer to the vprintf buffer
-	vclear := func() {} // clear the vprintf2 buffer
 
 	if flags.Verbose {
 		var vbuf bytes.Buffer
@@ -184,123 +230,131 @@ func main() {
 		}
 	}
 
-	clear := func() {}
 	if flags.Clear {
 		clear = func() {
 			os.Stdout.Write([]byte("\033[H\033[2J\033[3J"))
 		}
 	}
 
-	seen := map[string]os.FileInfo{}
-	for {
-		// Collect all files currently matching our pattern
-		files, err := MultiGlob(patterns)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+	if flags.Wait {
+		for _, s := range sets {
+			s.same()
 		}
-		// Compare them with what we have seen before.
-		// Anything left in Seen has been deleted.
-		// Anything not in Seen is new.
-		same := true
-		vclear()
-		for path, f1 := range files {
-			// Skip directories
-			if f1.IsDir() {
-				delete(files, path)
-				continue
-			}
-			f2, ok := seen[path]
-			delete(seen, path)
-			if !ok || !SameFile(f1, f2) {
-				same = false
-				if !flags.Verbose {
-					// Once we have seen one difference
-					// we can stop checking, unless we are
-					// in verbose mode in which case we
-					// have to keep checking.
-					break
-				}
-				if ok {
-					vprintf2("* %s\n", path)
-				} else {
-					vprintf2("+ %s\n", path)
-				}
-			} else {
-				vprintf2("= %s\n", path)
-			}
-		}
-		if len(seen) != 0 {
-			if flags.Verbose {
-				for path := range seen {
-					vprintf2("- %s\n", path)
-				}
-			}
-			same = false
-		}
-		seen = files
+		time.Sleep(flags.Frequency)
+	}
 
-		if flags.Wait {
-			// This is our first time around, start checking
-			flags.Wait = false
-			time.Sleep(flags.Frequency)
-			continue
-		}
+	t := time.NewTicker(flags.Frequency)
+	finished := make(chan struct{})
+	close(finished)
 
-		if same {
-			select {
-			case <-finished:
-			default:
-				// The previous command has not yet
-				// finished, check if we should kill it.
-				if now().Before(endTime) {
-					break
-				}
-
+	for tick := range t.C {
+		select {
+		case <-finished:
+		default:
+			if tick.After(endTime) {
 				printf("Killing runaway\n")
 				cmd.Process.Kill()
 			}
-			time.Sleep(flags.Frequency)
-			continue
 		}
-		vadd()
-		clear()
-		vflush()
-
-		// A command might still be running.
-		if cmd != nil && cmd.Process != nil {
-			printf("%s Killing old command\n", now())
-			cmd.Process.Kill()
-			printf("%s Waiting for death...\n", now())
-			cmd.Wait()
-		}
-
-		// At this point we assume the spawned processes have
-		// completed.  We forget about them.
-
-		printf("%s Starting %s\n", now(), command)
-
-		cmd = exec.Command(command[0], command[1:]...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Start(); err != nil {
-			printf("%v\n", err)
-			cmd = nil
-			continue
-		}
-		endTime = now().Add(flags.Timeout)
-
-		finished = make(chan struct{})
-		go func(cmd *exec.Cmd, finished chan struct{}) {
-			err := cmd.Wait()
-			vprintf("command returns %v\n", err)
-			if err != nil {
-				printf("Command died with %v\n", err)
-			} else {
-				printf("Command exited ")
+		for _, s := range sets {
+			if s.same() {
+				continue
 			}
-			close(finished)
-		}(cmd, finished)
+			// A command might still be running.
+			if cmd != nil && cmd.Process != nil {
+				printf("%s Killing old command\n", now())
+				cmd.Process.Kill()
+				printf("%s Waiting for death...\n", now())
+				cmd.Wait()
+			}
+			endTime = now().Add(flags.Timeout)
+			cmd, finished = s.run()
+			break
+		}
 	}
+}
+
+func (s *set) same() bool {
+	// Collect all files currently matching our pattern
+	files, err := MultiGlob(s.patterns)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	// Compare them with what we have seen before.
+	// Anything left in Seen has been deleted.
+	// Anything not in Seen is new.
+	same := true
+	vclear()
+	for path, f1 := range files {
+		// Skip directories
+		if f1.IsDir() {
+			delete(files, path)
+			continue
+		}
+		f2, ok := s.seen[path]
+		delete(s.seen, path)
+		if !ok || !SameFile(f1, f2) {
+			same = false
+			if !flags.Verbose {
+				// Once we have seen one difference
+				// we can stop checking, unless we are
+				// in verbose mode in which case we
+				// have to keep checking.
+				break
+			}
+			if ok {
+				vprintf2("* %s\n", path)
+			} else {
+				vprintf2("+ %s\n", path)
+			}
+		} else {
+			vprintf2("= %s\n", path)
+		}
+	}
+	if len(s.seen) != 0 {
+		if flags.Verbose {
+			for path := range s.seen {
+				vprintf2("- %s\n", path)
+			}
+		}
+		same = false
+	}
+	s.seen = files
+	return same
+}
+
+func (s *set) run() (*exec.Cmd, chan struct{}) {
+	vadd()
+	clear()
+	vflush()
+
+	// At this point we assume the spawned processes have
+	// completed.  We forget about them.
+
+	printf("%s Starting %s\n", now(), s.command)
+
+	cmd := exec.Command(s.command[0], s.command[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	finished := make(chan struct{})
+	if err := cmd.Start(); err != nil {
+		printf("%v\n", err)
+		cmd = nil
+		close(finished)
+		return nil, finished
+	}
+
+	go func(cmd *exec.Cmd, finished chan struct{}) {
+		err := cmd.Wait()
+		vprintf("command returns %v\n", err)
+		if err != nil {
+			printf("Command died with %v\n", err)
+		} else {
+			printf("Command exited ")
+		}
+		close(finished)
+	}(cmd, finished)
+	return cmd, finished
 }
