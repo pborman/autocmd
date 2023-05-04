@@ -91,7 +91,10 @@ func Expand(pattern string) []string {
 	}
 	var paths []string
 	filepath.Walk(pre, func(path string, info os.FileInfo, err error) error {
-		if !info.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if info == nil || !info.IsDir() {
 			return nil
 		}
 		if !flags.Git && filepath.Base(path) == ".git" {
