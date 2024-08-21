@@ -15,15 +15,25 @@
 //
 //	autocmd --go go test
 //
-// Multiple sets of commands can be set to run by separating them with ---.
-// For example:
+// Multiple sets of commands can be set to run by separating them with ---.  For
+// example:
 //
 //	autocmd grammer.y -- goyacc -o grammar.go grammar.y \
 //		--- .../*.go go build
 //
-// This will cause autocmd to run goyacc if grammer.y changes and go build
-// if any .go file changes.  If grammar.y changes then grammer.go will change
-// which will trigger the go build.
+// This will cause autocmd to run goyacc if grammer.y changes and go build if
+// any .go file changes.  If grammar.y changes then grammer.go will change which
+// will trigger the go build.
+//
+// CONFIG
+//
+// A config file, specified by --config, can be used to alter the patterns
+// looked for by --go.  An example configuration:
+//
+//	# this is a comment
+//	go: .../*.go
+//	go: .../*.sdl
+//	go: BUILD
 package main
 
 import (
@@ -50,9 +60,11 @@ var flags = struct {
 	Clear     bool          `getopt:"--clear -c clear display before executing a command"`
 	Wait      bool          `getopt:"--wait wait for first change"`
 	Frequency time.Duration `getopt:"--frequency=DUR -f set time to delay between checks"`
+	Config    string        `getopt:"--config=PATH path to config file to load"`
 }{
 	Timeout:   time.Hour,
 	Frequency: time.Second / 2,
+	Config:    os.ExpandEnv("$HOME/.config/autocmd"),
 }
 
 // SameFile returns true if f1 and f2 appear to be the same file.
@@ -158,14 +170,41 @@ func newSet(args []string) *set {
 }
 
 var (
-	printf   = fmt.Printf
-	clear    = func() {}
-	vprintf  = func(f string, v ...interface{}) {}
-	vprintf2 = func(f string, v ...interface{}) {}
-	vflush   = func() {} // write out the contents of the vprintf buffer
-	vadd     = func() {} // append the vprintf2 buffer to the vprintf buffer
-	vclear   = func() {} // clear the vprintf2 buffer
+	printf     = fmt.Printf
+	clear      = func() {}
+	vprintf    = func(f string, v ...interface{}) {}
+	vprintf2   = func(f string, v ...interface{}) {}
+	vflush     = func() {} // write out the contents of the vprintf buffer
+	vadd       = func() {} // append the vprintf2 buffer to the vprintf buffer
+	vclear     = func() {} // clear the vprintf2 buffer
+	gopatterns = []string{".../*.go"}
 )
+
+func readConfig(path string) {
+	data, _ := os.ReadFile(path)
+	var patterns []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		cmd := strings.SplitN(line, ":", 2)
+		switch len(cmd) {
+		// case 1: someday for single word commands
+		case 2:
+			switch strings.TrimSpace(cmd[0]) {
+			case "go":
+				patterns = append(patterns, strings.TrimSpace(cmd[1]))
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Invalid config command: %q", line)
+			continue
+		}
+	}
+	if len(patterns) > 0 {
+fmt.Printf("Set patterns to %q\n", patterns)
+		gopatterns = patterns
+	}
+}
 
 func main() {
 	getopt.SetParameters("PATTERN [...] -- CMD [...] [--- CMD [...] ...]")
@@ -177,12 +216,15 @@ func main() {
 		getopt.PrintUsage(os.Stderr)
 		os.Exit(1)
 	}
+	if flags.Config != "" {
+		readConfig(flags.Config)
+	}
 
 	if flags.Go {
 		flags.Clear = true
 		sets = []*set{{
 			command:  patterns,
-			patterns: []string{".../*.go"},
+			patterns: gopatterns,
 			seen:     map[string]os.FileInfo{},
 		}}
 	} else {
