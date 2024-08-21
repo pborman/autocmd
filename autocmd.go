@@ -201,7 +201,6 @@ func readConfig(path string) {
 		}
 	}
 	if len(patterns) > 0 {
-fmt.Printf("Set patterns to %q\n", patterns)
 		gopatterns = patterns
 	}
 }
