@@ -25,7 +25,7 @@
 // any .go file changes.  If grammar.y changes then grammer.go will change which
 // will trigger the go build.
 //
-// CONFIG
+// # CONFIG
 //
 // A config file, specified by --config, can be used to alter the patterns
 // looked for by --go.  An example configuration:
@@ -42,9 +42,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/pborman/getopt/v2"
@@ -205,8 +207,11 @@ func readConfig(path string) {
 	}
 }
 
+var intChan = make(chan os.Signal, 1)
+
 func main() {
 	getopt.SetParameters("PATTERN [...] -- CMD [...] [--- CMD [...] ...]")
+	// signal.Notify(intChan, os.Interrupt, os.Signal(syscall.SIGTERM))
 
 	var sets []*set
 
@@ -291,12 +296,32 @@ func main() {
 	finished := make(chan struct{})
 	close(finished)
 
+	signal.Notify(intChan, syscall.SIGINT, syscall.SIGHUP, syscall.SIGABRT, syscall.SIGQUIT, syscall.SIGTERM)
+	hadInt := false
 	for tick := range t.C {
 		select {
+		case sig := <-intChan:
+			if cmd != nil && cmd.Process != nil {
+				pids := GetChildren(cmd.Process.Pid)
+				if len(pids) > 0 {
+					printf("Killing interrupted children\n")
+					killall(pids)
+				}
+				cmd.Process.Kill()
+			}
+			if sig != syscall.SIGINT || hadInt {
+				os.Exit(1)
+			}
+			printf("Press ^C again to quit\n")
+			hadInt = true
 		case <-finished:
 		default:
 			if tick.After(endTime) {
-				printf("Killing runaway\n")
+				pids := GetChildren(cmd.Process.Pid)
+				if len(pids) > 0 {
+					printf("Killing runaways\n")
+					killall(pids)
+				}
 				cmd.Process.Kill()
 			}
 		}
@@ -306,16 +331,43 @@ func main() {
 			}
 			// A command might still be running.
 			if cmd != nil && cmd.Process != nil {
-				printf("%s Killing old command\n", now())
-				cmd.Process.Kill()
-				printf("%s Waiting for death...\n", now())
-				cmd.Wait()
+				pids := GetChildren(cmd.Process.Pid)
+				if len(pids) > 0 {
+					printf("%s Killing old command\n", now())
+					killall(pids)
+					cmd.Process.Kill()
+					printf("%s Waiting for death...\n", now())
+					cmd.Wait()
+				}
 			}
 			endTime = now().Add(flags.Timeout)
+			hadInt = false
 			cmd, finished = s.run()
 			break
 		}
 	}
+}
+
+func killall(pids []int) {
+	dead := map[int]bool{}
+	printf("Killing %d\n", pids)
+	for len(dead) < len(pids) {
+		for n := len(pids); n > 0; {
+			n--
+			pid := pids[n]
+			if dead[pid] {
+				continue
+			}
+			if syscall.Kill(pid, 0) != nil {
+				printf("%d exited\n", pid)
+				dead[pid] = true
+				continue
+			}
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+		time.Sleep(time.Second)
+	}
+	printf("child processed cleaned up\n")
 }
 
 func (s *set) same() bool {
