@@ -51,6 +51,7 @@ import (
 
 	"github.com/pborman/getopt/v2"
 	"github.com/pborman/options"
+	"github.com/pborman/ps"
 )
 
 var flags = struct {
@@ -302,12 +303,14 @@ func main() {
 		select {
 		case sig := <-intChan:
 			if cmd != nil && cmd.Process != nil {
-				pids := GetChildren(cmd.Process.Pid)
+				pids := append(ps.GetDecendents(cmd.Process.Pid), cmd.Process.Pid)
 				if len(pids) > 0 {
 					printf("Killing interrupted children\n")
 					killall(pids)
 				}
 				cmd.Process.Kill()
+				cmd.Wait()
+				cmd = nil
 			}
 			if sig != syscall.SIGINT || hadInt {
 				os.Exit(1)
@@ -316,13 +319,15 @@ func main() {
 			hadInt = true
 		case <-finished:
 		default:
-			if tick.After(endTime) {
-				pids := GetChildren(cmd.Process.Pid)
+			if tick.After(endTime) && cmd != nil {
+				pids := append(ps.GetDecendents(cmd.Process.Pid), cmd.Process.Pid)
 				if len(pids) > 0 {
 					printf("Killing runaways\n")
 					killall(pids)
 				}
 				cmd.Process.Kill()
+				cmd.Wait()
+				cmd = nil
 			}
 		}
 		for _, s := range sets {
@@ -331,7 +336,7 @@ func main() {
 			}
 			// A command might still be running.
 			if cmd != nil && cmd.Process != nil {
-				pids := GetChildren(cmd.Process.Pid)
+				pids := append(ps.GetDecendents(cmd.Process.Pid), cmd.Process.Pid)
 				if len(pids) > 0 {
 					printf("%s Killing old command\n", now())
 					killall(pids)
@@ -339,6 +344,7 @@ func main() {
 					printf("%s Waiting for death...\n", now())
 					cmd.Wait()
 				}
+				cmd = nil
 			}
 			endTime = now().Add(flags.Timeout)
 			hadInt = false
