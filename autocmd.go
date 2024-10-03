@@ -34,6 +34,15 @@
 //	go: .../*.go
 //	go: .../*.sdl
 //	go: BUILD
+//
+// If --config is not specified then the config will be read from the .autocmd
+// file in the current directory, if it exists.  If not the default config will
+// be used if it exists.
+//
+// The config file is silently added to the list of files to check and will be
+// reread if it changes.
+//
+// Using --config= will prevent any configuration file from being read.
 package main
 
 import (
@@ -181,10 +190,31 @@ var (
 	vadd       = func() {} // append the vprintf2 buffer to the vprintf buffer
 	vclear     = func() {} // clear the vprintf2 buffer
 	gopatterns = []string{".../*.go"}
+	goset      *set
 )
 
-func readConfig(path string) {
-	data, _ := os.ReadFile(path)
+var configFile string
+
+func checkConfig() {
+	if configFile == "" || goset == nil {
+		return
+	}
+	f1, err := os.Stat(configFile)
+	if err != nil {
+		return
+	}
+	defer func() { goset.seen[configFile] = f1 }()
+	f2, ok := goset.seen[configFile]
+	if !ok || !SameFile(f1, f2) {
+		readConfig(configFile)
+	}
+}
+
+func readConfig(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
 	var patterns []string
 	for _, line := range strings.Split(string(data), "\n") {
 		if line == "" || line[0] == '#' {
@@ -206,6 +236,12 @@ func readConfig(path string) {
 	if len(patterns) > 0 {
 		gopatterns = patterns
 	}
+	gopatterns = append(gopatterns, path)
+	if goset != nil {
+		goset.patterns = gopatterns
+	}
+	configFile = path
+	return true
 }
 
 var intChan = make(chan os.Signal, 1)
@@ -222,7 +258,15 @@ func main() {
 		os.Exit(1)
 	}
 	if flags.Config != "" {
-		readConfig(flags.Config)
+		if getopt.IsSet("config") {
+			if !readConfig(flags.Config) {
+				fmt.Fprintf(os.Stderr, "Could not open %s.\n", flags.Config)
+				os.Exit(1)
+			}
+		}
+		if !readConfig(".autocmd") {
+			readConfig(flags.Config)
+		}
 	}
 
 	if flags.Go {
@@ -330,6 +374,7 @@ func main() {
 				cmd = nil
 			}
 		}
+		checkConfig()
 		for _, s := range sets {
 			if s.same() {
 				continue
