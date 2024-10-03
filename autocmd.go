@@ -194,6 +194,7 @@ var (
 )
 
 var configFile string
+var configStat os.FileInfo
 
 func checkConfig() {
 	if configFile == "" || goset == nil {
@@ -203,9 +204,8 @@ func checkConfig() {
 	if err != nil {
 		return
 	}
-	defer func() { goset.seen[configFile] = f1 }()
-	f2, ok := goset.seen[configFile]
-	if !ok || !SameFile(f1, f2) {
+	defer func() { configStat = f1 }()
+	if configStat == nil || !SameFile(f1, configStat) {
 		readConfig(configFile)
 	}
 }
@@ -276,6 +276,7 @@ func main() {
 			patterns: gopatterns,
 			seen:     map[string]os.FileInfo{},
 		}}
+		goset = sets[0]
 	} else {
 		sets = []*set{
 			newSet(patterns),
