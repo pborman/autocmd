@@ -248,7 +248,6 @@ var intChan = make(chan os.Signal, 1)
 
 func main() {
 	getopt.SetParameters("PATTERN [...] -- CMD [...] [--- CMD [...] ...]")
-	// signal.Notify(intChan, os.Interrupt, os.Signal(syscall.SIGTERM))
 
 	var sets []*set
 
@@ -342,7 +341,7 @@ func main() {
 	finished := make(chan struct{})
 	close(finished)
 
-	signal.Notify(intChan, syscall.SIGINT, syscall.SIGHUP, syscall.SIGABRT, syscall.SIGQUIT, syscall.SIGTERM)
+	signal.Notify(intChan, syscall.SIGINT, syscall.SIGHUP, syscall.SIGABRT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGTSTP)
 	hadInt := false
 	for tick := range t.C {
 		select {
@@ -357,11 +356,23 @@ func main() {
 				cmd.Wait()
 				cmd = nil
 			}
-			if sig != syscall.SIGINT || hadInt {
-				os.Exit(1)
+			switch sig {
+			case syscall.SIGTSTP:
+				// Force us to run again
+				for _, s := range sets {
+					s.seen = map[string]os.FileInfo{}
+					break
+				}
+				hadInt = false
+			case syscall.SIGINT:
+				if hadInt {
+					os.Exit(1)
+				}
+				printf("Press ^C again to quit\n")
+				hadInt = true
+			default:
+					os.Exit(1)
 			}
-			printf("Press ^C again to quit\n")
-			hadInt = true
 		case <-finished:
 		default:
 			if tick.After(endTime) && cmd != nil {
