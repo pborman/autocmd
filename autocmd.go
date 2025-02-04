@@ -491,7 +491,10 @@ func (s *set) run() (*exec.Cmd, chan struct{}) {
 	// At this point we assume the spawned processes have
 	// completed.  We forget about them.
 
-	printf("%s Starting %s\n", now(), s.command)
+	printf(`
+%s Starting %s
+^C to stop, ^Z to rerun, ^/ to quit
+`[1:], now(), s.command)
 
 	cmd := exec.Command(s.command[0], s.command[1:]...)
 	cmd.Stdout = os.Stdout
