@@ -73,10 +73,20 @@ var flags = struct {
 	Wait      bool          `getopt:"--wait wait for first change"`
 	Frequency time.Duration `getopt:"--frequency=DUR -f set time to delay between checks"`
 	Config    string        `getopt:"--config=PATH path to config file to load"`
+	Cwd       string        `getopt:"--cwd=PATH path to current workding directory"`
 }{
 	Timeout:   time.Hour,
 	Frequency: time.Second / 2,
 	Config:    os.ExpandEnv("$HOME/.config/autocmd"),
+}
+
+func init() {
+	wd, err := os.Getwd()
+	if err == nil {
+		flags.Cwd = wd
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: cannot get current working directory: %v\n", err)
+	}
 }
 
 // SameFile returns true if f1 and f2 appear to be the same file.
@@ -371,7 +381,7 @@ func main() {
 				printf("Press ^C again to quit\n")
 				hadInt = true
 			default:
-					os.Exit(1)
+				os.Exit(1)
 			}
 		case <-finished:
 		default:
@@ -434,6 +444,20 @@ func killall(pids []int) {
 }
 
 func (s *set) same() bool {
+	// Check to see if our WD went away.
+	if _, err := os.Stat("."); err != nil {
+		if flags.Cwd == "" || !strings.Contains(err.Error(), "ransport endpoint is not connected") {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		printf("Current working directory is gone.  Will retry.\n")
+		for {
+			if err := os.Chdir(flags.Cwd); err == nil {
+				break
+			}
+			time.Sleep(time.Second * 5)
+		}
+	}
 	// Collect all files currently matching our pattern
 	files, err := MultiGlob(s.patterns)
 	if err != nil {
